@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.3.0
+ * Version: 2.4.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -330,45 +330,62 @@ add_action('wp_footer', function () {
             return html2canvasPromise;
         }
 
-        function captureScreenshot(opts) {
-            var size = opts.size || 400;
-            var pageX = opts.pageX || 0;
-            var pageY = opts.pageY || 0;
-            var requestId = opts.requestId || null;
-
-            var x = Math.max(0, pageX - size / 2);
-            var y = Math.max(0, pageY - size / 2);
-
+        // Capture the visible viewport with html2canvas (no x/y cropping — that
+        // doesn't work reliably on Elementor-style layouts with nested wrappers
+        // and transforms), then crop client-side around the click point. The
+        // click point is always visible in the viewport at click time, so this
+        // is the most reliable way to get an accurate screenshot.
+        function captureViewportAndCrop(clientX, clientY, size, screenshotId) {
             return loadHtml2Canvas().then(function(html2canvas) {
-                return html2canvas(document.body, {
-                    x: x,
-                    y: y,
-                    width: size,
-                    height: size,
+                return html2canvas(document.documentElement, {
                     useCORS: true,
                     allowTaint: true,
                     logging: false,
                     backgroundColor: '#ffffff',
-                    scale: 1
+                    scale: 1,
+                    foreignObjectRendering: false
                 });
-            }).then(function(canvas) {
-                var dataUrl = canvas.toDataURL('image/png');
+            }).then(function(viewportCanvas) {
+                // viewportCanvas covers the WHOLE document at scale 1.
+                // The click happened at (clientX, clientY) in viewport coords,
+                // which translate to (clientX + scrollX, clientY + scrollY) in
+                // document coords. html2canvas captures the document so we need
+                // to use document coords for cropping.
+                var docX = clientX + getScrollX();
+                var docY = clientY + getScrollY();
+
+                var sx = Math.max(0, Math.min(viewportCanvas.width - size, Math.round(docX - size / 2)));
+                var sy = Math.max(0, Math.min(viewportCanvas.height - size, Math.round(docY - size / 2)));
+                // If the document is smaller than the requested size on either axis
+                var actualW = Math.min(size, viewportCanvas.width);
+                var actualH = Math.min(size, viewportCanvas.height);
+
+                var cropCanvas = document.createElement('canvas');
+                cropCanvas.width = actualW;
+                cropCanvas.height = actualH;
+                var ctx = cropCanvas.getContext('2d');
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, actualW, actualH);
+                ctx.drawImage(viewportCanvas, sx, sy, actualW, actualH, 0, 0, actualW, actualH);
+
+                return cropCanvas.toDataURL('image/png');
+            }).then(function(dataUrl) {
                 window.parent.postMessage({
-                    type: 'markup-screenshot-result',
-                    requestId: requestId,
-                    dataUrl: dataUrl,
-                    pageX: pageX,
-                    pageY: pageY,
-                    size: size
+                    type: 'markup-click-screenshot',
+                    screenshotId: screenshotId,
+                    dataUrl: dataUrl
                 }, '*');
             }).catch(function(err) {
                 window.parent.postMessage({
-                    type: 'markup-screenshot-result',
-                    requestId: requestId,
+                    type: 'markup-click-screenshot',
+                    screenshotId: screenshotId,
                     error: String(err && err.message || err)
                 }, '*');
             });
         }
+
+        // Track comment mode so click handler knows whether to capture a screenshot
+        var commentMode = false;
 
         // Listen for commands from parent
         window.addEventListener('message', function(e) {
@@ -383,16 +400,22 @@ add_action('wp_footer', function () {
                 });
                 setTimeout(reportState, scrollBehavior === 'instant' ? 50 : 400);
             } else if (e.data && e.data.type === 'markup-set-comment-mode') {
+                commentMode = !!e.data.enabled;
                 document.body.style.cursor = e.data.enabled ? 'crosshair' : '';
+                // Pre-load html2canvas when entering comment mode so the first
+                // click capture doesn't have to wait for the script to download.
+                if (commentMode) loadHtml2Canvas().catch(function(){});
             } else if (e.data && e.data.type === 'markup-clear-selection') {
                 window.getSelection().removeAllRanges();
-            } else if (e.data && e.data.type === 'markup-capture-screenshot') {
-                captureScreenshot(e.data);
             }
         });
 
         // Track whether text was just selected (to suppress click after selection)
         var hadTextSelection = false;
+
+        function newScreenshotId() {
+            return 'shot-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        }
 
         // Listen for text selection FIRST (mouseup fires before click)
         document.addEventListener('mouseup', function() {
@@ -401,20 +424,27 @@ add_action('wp_footer', function () {
                 hadTextSelection = true;
                 var range = sel.getRangeAt(0);
                 var rect = range.getBoundingClientRect();
+                var screenshotId = null;
+                if (commentMode) {
+                    screenshotId = newScreenshotId();
+                    // Capture around the center of the selection (viewport coords)
+                    captureViewportAndCrop(rect.left + rect.width / 2, rect.top + rect.height / 2, 400, screenshotId);
+                }
                 window.parent.postMessage({
                     type: 'markup-text-selected',
                     selectedText: sel.toString().trim(),
-                    rectTop: rect.top + window.scrollY,
-                    rectLeft: rect.left + window.scrollX,
+                    rectTop: rect.top + getScrollY(),
+                    rectLeft: rect.left + getScrollX(),
                     rectWidth: rect.width,
                     rectHeight: rect.height,
                     viewportX: rect.left + rect.width / 2,
                     viewportY: rect.top,
-                    scrollX: window.scrollX,
-                    scrollY: window.scrollY,
+                    scrollX: getScrollX(),
+                    scrollY: getScrollY(),
                     viewportWidth: window.innerWidth,
                     viewportHeight: window.innerHeight,
-                    currentUrl: window.location.href
+                    currentUrl: window.location.href,
+                    screenshotId: screenshotId
                 }, '*');
             } else {
                 hadTextSelection = false;
@@ -428,17 +458,26 @@ add_action('wp_footer', function () {
                 hadTextSelection = false;
                 return;
             }
+            var screenshotId = null;
+            if (commentMode) {
+                screenshotId = newScreenshotId();
+                // Kick off screenshot capture asynchronously — uses viewport
+                // coords (clientX/Y) which are guaranteed correct since the
+                // user just clicked there.
+                captureViewportAndCrop(e.clientX, e.clientY, 400, screenshotId);
+            }
             window.parent.postMessage({
                 type: 'markup-click',
                 viewportX: e.clientX,
                 viewportY: e.clientY,
                 pageX: e.pageX,
                 pageY: e.pageY,
-                scrollX: window.scrollX,
-                scrollY: window.scrollY,
+                scrollX: getScrollX(),
+                scrollY: getScrollY(),
                 viewportWidth: window.innerWidth,
                 viewportHeight: window.innerHeight,
-                currentUrl: window.location.href
+                currentUrl: window.location.href,
+                screenshotId: screenshotId
             }, '*');
         });
 
