@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.7.0
+ * Version: 2.7.1
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -183,7 +183,9 @@ add_action('send_headers', function () {
 
 add_action('wp_head', function () {
     // Only inject when loaded inside the Copilot iframe
-    if ( empty( $_SERVER['HTTP_SEC_FETCH_DEST'] ) || $_SERVER['HTTP_SEC_FETCH_DEST'] !== 'iframe' ) {
+    if ( isset( $_GET['elementor-preview'] ) || ( isset( $_GET['action'] ) && 'elementor' === $_GET['action'] ) ) { return; } // skip the Elementor editor/preview
+    $cbx_sfsite = $_SERVER['HTTP_SEC_FETCH_SITE'] ?? '';
+    if ( ( $_SERVER['HTTP_SEC_FETCH_DEST'] ?? '' ) !== 'iframe' || 'same-origin' === $cbx_sfsite ) {
         // Fallback: check referer
         $referer = $_SERVER['HTTP_REFERER'] ?? '';
         if ( strpos( $referer, 'copilot.chirobasix.com' ) === false && strpos( $referer, 'localhost' ) === false ) {
@@ -259,6 +261,7 @@ add_action('wp_head', function () {
 });
 
 add_action('wp_footer', function () {
+    if ( isset( $_GET['elementor-preview'] ) || ( isset( $_GET['action'] ) && 'elementor' === $_GET['action'] ) ) { return; } // skip the Elementor editor/preview
     ?>
     <script>
     (function() {
