@@ -3,9 +3,9 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.9.0
+ * Version: 2.9.1
  * Author: ChiroBasix
- * GitHub Repo: CHIROBASIX-LLC/cbx-plugins-copilot-markup-tool
+ * GitHub Repo: CHIROBASIX-LLC/chirobasix-copilot-markup-tool
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -17,7 +17,7 @@ defined( 'ABSPATH' ) || exit;
 class CBX_Copilot_Bridge_Updater {
 
     private const GITHUB_OWNER = 'CHIROBASIX-LLC';
-    private const GITHUB_REPO  = 'cbx-plugins-copilot-markup-tool';
+    private const GITHUB_REPO  = 'chirobasix-copilot-markup-tool';
     private const TRANSIENT    = 'cbx_copilot_bridge_update';
     private const CHECK_INTERVAL = 6 * HOUR_IN_SECONDS;
 
