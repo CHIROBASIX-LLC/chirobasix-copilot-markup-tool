@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.8.0
+ * Version: 2.9.0
  * Author: ChiroBasix
  * GitHub Repo: CHIROBASIX-LLC/cbx-plugins-copilot-markup-tool
  */
@@ -412,6 +412,143 @@ add_action('wp_footer', function () {
             });
         }
 
+        // ─── Element highlight + descriptor (Claude-Design-style) ───
+        var hlBox = null, hlLabel = null;
+        function ensureHighlightEls() {
+            if (hlBox) return;
+            hlBox = document.createElement('div');
+            hlBox.setAttribute('data-cbx-markup-highlight', '1');
+            hlBox.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483646;border:2px solid #2563eb;border-radius:4px;background:rgba(37,99,235,0.08);box-shadow:0 0 0 1px rgba(37,99,235,0.25);display:none;';
+            hlLabel = document.createElement('div');
+            hlLabel.setAttribute('data-cbx-markup-highlight', '1');
+            hlLabel.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483647;background:#2563eb;color:#fff;font:600 11px/1.4 -apple-system,system-ui,sans-serif;padding:2px 6px;border-radius:4px;white-space:nowrap;display:none;';
+            document.body.appendChild(hlBox);
+            document.body.appendChild(hlLabel);
+        }
+        function hideHighlight() {
+            if (hlBox) hlBox.style.display = 'none';
+            if (hlLabel) hlLabel.style.display = 'none';
+        }
+        function isInlineDisplay(el) {
+            try { return window.getComputedStyle(el).display === 'inline'; } catch (e) { return false; }
+        }
+        // Resolve the "meaningful" element under the cursor: climb out of pure-inline
+        // wrappers (spans/links/emphasis around text) to the nearest block element.
+        // This lands on a list item / paragraph / heading when over text, and on the
+        // column/section container when over their empty space — matching Claude Design.
+        function resolveSmartElement(node) {
+            if (!node) return null;
+            var el = node.nodeType === 1 ? node : node.parentElement;
+            if (!el) return null;
+            if (el.getAttribute && el.getAttribute('data-cbx-markup-highlight')) return null;
+            if (el === document.documentElement || el === document.body) return el;
+            var guard = 0;
+            while (el.parentElement && el.parentElement !== document.body && isInlineDisplay(el) && guard++ < 10) {
+                el = el.parentElement;
+            }
+            return el;
+        }
+        function cbxCssEscape(s) {
+            if (window.CSS && CSS.escape) return CSS.escape(s);
+            return String(s).replace(/[^a-zA-Z0-9_-]/g, function (c) { return '\\' + c; });
+        }
+        function cbxNthOfType(el) {
+            var i = 1, sib = el;
+            while ((sib = sib.previousElementSibling)) { if (sib.tagName === el.tagName) i++; }
+            return i;
+        }
+        function buildSelector(el) {
+            var parts = [], cur = el, depth = 0;
+            while (cur && cur.nodeType === 1 && cur !== document.body && depth++ < 6) {
+                if (cur.id) { parts.unshift('#' + cbxCssEscape(cur.id)); break; }
+                parts.unshift(cur.tagName.toLowerCase() + ':nth-of-type(' + cbxNthOfType(cur) + ')');
+                cur = cur.parentElement;
+            }
+            return parts.join(' > ');
+        }
+        function meaningfulClasses(el) {
+            var out = [];
+            var cls = (el.className && el.className.split) ? el.className.split(/\s+/) : [];
+            for (var i = 0; i < cls.length && out.length < 6; i++) {
+                var c = cls[i];
+                if (!c) continue;
+                if (/^elementor-element-[0-9a-f]+$/.test(c)) continue;
+                if (/^e-con/.test(c)) continue;
+                out.push(c);
+            }
+            return out;
+        }
+        function nearestSectionLabel(el) {
+            var sec = el.closest && el.closest('section,header,footer,.elementor-section,.elementor-top-section');
+            if (!sec) return null;
+            var h = sec.querySelector && sec.querySelector('h1,h2,h3,h4');
+            var t = h && (h.innerText || h.textContent);
+            if (t && t.trim()) return t.trim().slice(0, 80);
+            var aria = sec.getAttribute && sec.getAttribute('aria-label');
+            if (aria) return aria.slice(0, 80);
+            if (sec.id) return '#' + sec.id;
+            return null;
+        }
+        function buildElementInfo(el) {
+            // Never describe the page itself — clicking bare body/html chrome
+            // should record no element (matches the hover guard).
+            if (!el || el.nodeType !== 1 || el === document.body || el === document.documentElement) return null;
+            var rect = el.getBoundingClientRect();
+            var text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+            var widget = el.closest && el.closest('[data-widget_type]');
+            return {
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                classes: meaningfulClasses(el),
+                widgetType: (widget && widget.getAttribute('data-widget_type')) || null,
+                selector: buildSelector(el),
+                text: text,
+                rect: {
+                    x: Math.round(rect.left + getScrollX()),
+                    y: Math.round(rect.top + getScrollY()),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height)
+                },
+                section: { label: nearestSectionLabel(el) }
+            };
+        }
+        // rAF-throttled hover highlight (active only in comment mode)
+        var hoverPending = false, lastHoverEvent = null;
+        function onCommentHover(e) {
+            lastHoverEvent = e;
+            if (hoverPending) return;
+            hoverPending = true;
+            requestAnimationFrame(function () {
+                hoverPending = false;
+                if (!commentMode || !lastHoverEvent) { hideHighlight(); return; }
+                var el = resolveSmartElement(lastHoverEvent.target);
+                if (!el || el === document.body || el === document.documentElement) { hideHighlight(); return; }
+                var rect = el.getBoundingClientRect();
+                if (rect.width < 1 || rect.height < 1) { hideHighlight(); return; }
+                ensureHighlightEls();
+                hlBox.style.display = 'block';
+                hlBox.style.left = (rect.left + getScrollX()) + 'px';
+                hlBox.style.top = (rect.top + getScrollY()) + 'px';
+                hlBox.style.width = rect.width + 'px';
+                hlBox.style.height = rect.height + 'px';
+                var widget = el.closest && el.closest('[data-widget_type]');
+                hlLabel.textContent = (widget && widget.getAttribute('data-widget_type')) || el.tagName.toLowerCase();
+                hlLabel.style.display = 'block';
+                var lt = rect.top + getScrollY() - 20;
+                if (lt < getScrollY()) lt = rect.top + getScrollY() + 2;
+                hlLabel.style.left = (rect.left + getScrollX()) + 'px';
+                hlLabel.style.top = lt + 'px';
+            });
+        }
+        function enableHover() {
+            ensureHighlightEls();
+            document.addEventListener('mousemove', onCommentHover, true);
+        }
+        function disableHover() {
+            document.removeEventListener('mousemove', onCommentHover, true);
+            hideHighlight();
+        }
+
         // Track comment mode so click handler knows whether to capture a screenshot
         var commentMode = false;
 
@@ -432,7 +569,8 @@ add_action('wp_footer', function () {
                 document.body.style.cursor = e.data.enabled ? 'crosshair' : '';
                 // Pre-load html2canvas when entering comment mode so the first
                 // click capture doesn't have to wait for the script to download.
-                if (commentMode) loadHtml2Canvas().catch(function(){});
+                if (commentMode) { loadHtml2Canvas().catch(function(){}); enableHover(); }
+                else { disableHover(); }
             } else if (e.data && e.data.type === 'markup-clear-selection') {
                 window.getSelection().removeAllRanges();
             }
@@ -494,9 +632,11 @@ add_action('wp_footer', function () {
                 return;
             }
             var screenshotId = null;
+            var elementInfo = null;
             if (commentMode) {
                 screenshotId = newScreenshotId();
-                // Capture a region centered on the click.
+                // Capture which element was clicked (smart-resolved) + a region screenshot.
+                try { elementInfo = buildElementInfo(resolveSmartElement(e.target)); } catch (err) { elementInfo = null; }
                 captureRegion(e.pageX, e.pageY, e.target, screenshotId);
             }
             window.parent.postMessage({
@@ -510,7 +650,8 @@ add_action('wp_footer', function () {
                 viewportWidth: window.innerWidth,
                 viewportHeight: window.innerHeight,
                 currentUrl: window.location.href,
-                screenshotId: screenshotId
+                screenshotId: screenshotId,
+                elementInfo: elementInfo
             }, '*');
         });
 
