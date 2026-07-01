@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.10.0
+ * Version: 2.11.0
  * Author: ChiroBasix
  * GitHub Repo: CHIROBASIX-LLC/chirobasix-copilot-markup-tool
  */
@@ -552,6 +552,25 @@ add_action('wp_footer', function () {
         // Track comment mode so click handler knows whether to capture a screenshot
         var commentMode = false;
 
+        // Selector-free fallback anchor: find the smallest element whose text
+        // still contains the pin's captured text. Page edits often break the
+        // stored structural selector while the text itself survives — this is
+        // what lets pins follow their content through redesigns. Needles under
+        // 12 chars are too generic to trust (would mis-anchor).
+        function findByText(tag, text) {
+            if (!text) return null;
+            var needle = String(text).replace(/\s+/g, ' ').trim();
+            if (needle.length < 12) return null;
+            var scope = (tag && /^[a-z0-9]+$/i.test(tag)) ? tag : 'p,h1,h2,h3,h4,h5,h6,li,a,blockquote,span,figcaption,td,th,button';
+            var nodes = document.querySelectorAll(scope);
+            var best = null, bestLen = Infinity;
+            for (var i = 0; i < nodes.length; i++) {
+                var t = (nodes[i].textContent || '').replace(/\s+/g, ' ').trim();
+                if (t.indexOf(needle) !== -1 && t.length < bestLen) { best = nodes[i]; bestLen = t.length; }
+            }
+            return best;
+        }
+
         // Listen for commands from parent
         window.addEventListener('message', function(e) {
             if (e.data && e.data.type === 'markup-get-scroll') {
@@ -583,6 +602,8 @@ add_action('wp_footer', function () {
                 for (var pi = 0; pi < reqPins.length; pi++) {
                     var el = null;
                     try { el = reqPins[pi].selector ? document.querySelector(reqPins[pi].selector) : null; } catch (err) { el = null; }
+                    // Selector broken by a page edit? Follow the text instead.
+                    if (!el) { try { el = findByText(reqPins[pi].tag, reqPins[pi].text); } catch (err) { el = null; } }
                     if (el) {
                         var pr = el.getBoundingClientRect();
                         positions.push({
@@ -602,6 +623,7 @@ add_action('wp_footer', function () {
                 // center; fall back to the stored pixel target if it's gone.
                 var target = null;
                 try { target = e.data.selector ? document.querySelector(e.data.selector) : null; } catch (err) { target = null; }
+                if (!target) { try { target = findByText(e.data.tag, e.data.text); } catch (err) { target = null; } }
                 if (target) {
                     var tr = target.getBoundingClientRect();
                     window.scrollTo({
@@ -630,6 +652,7 @@ add_action('wp_footer', function () {
                 var range = sel.getRangeAt(0);
                 var rect = range.getBoundingClientRect();
                 var screenshotId = null;
+                var selElementInfo = null;
                 if (commentMode) {
                     screenshotId = newScreenshotId();
                     // Capture a region centered on the selected text.
@@ -641,9 +664,13 @@ add_action('wp_footer', function () {
                         selEl,
                         screenshotId
                     );
+                    // Anchor highlight comments to their element too — without
+                    // this they can never re-anchor after page edits/reflow.
+                    try { selElementInfo = buildElementInfo(resolveSmartElement(selEl)); } catch (err) { selElementInfo = null; }
                 }
                 window.parent.postMessage({
                     type: 'markup-text-selected',
+                    elementInfo: selElementInfo,
                     selectedText: sel.toString().trim(),
                     rectTop: rect.top + getScrollY(),
                     rectLeft: rect.left + getScrollX(),
