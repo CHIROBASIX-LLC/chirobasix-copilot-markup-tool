@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.9.1
+ * Version: 2.10.0
  * Author: ChiroBasix
  * GitHub Repo: CHIROBASIX-LLC/chirobasix-copilot-markup-tool
  */
@@ -573,6 +573,45 @@ add_action('wp_footer', function () {
                 else { disableHover(); }
             } else if (e.data && e.data.type === 'markup-clear-selection') {
                 window.getSelection().removeAllRanges();
+            } else if (e.data && e.data.type === 'markup-locate-pins') {
+                // Re-anchor element pins: report each selector's CURRENT
+                // document position. Stored pixel coords go stale whenever the
+                // page content changes or the viewport width differs from
+                // capture time, so the parent prefers these live positions.
+                var reqPins = (e.data.pins || []).slice(0, 300);
+                var positions = [];
+                for (var pi = 0; pi < reqPins.length; pi++) {
+                    var el = null;
+                    try { el = reqPins[pi].selector ? document.querySelector(reqPins[pi].selector) : null; } catch (err) { el = null; }
+                    if (el) {
+                        var pr = el.getBoundingClientRect();
+                        positions.push({
+                            id: reqPins[pi].id,
+                            found: true,
+                            pageX: Math.round(pr.left + getScrollX() + pr.width / 2),
+                            pageY: Math.round(pr.top + getScrollY() + Math.min(pr.height / 2, 40))
+                        });
+                    } else {
+                        positions.push({ id: reqPins[pi].id, found: false });
+                    }
+                }
+                // url lets the parent drop in-flight replies after a navigation.
+                window.parent.postMessage({ type: 'markup-pins-located', url: window.location.href, positions: positions }, '*');
+            } else if (e.data && e.data.type === 'markup-scroll-to-element') {
+                // Scroll the pin's element (at its live position) to viewport
+                // center; fall back to the stored pixel target if it's gone.
+                var target = null;
+                try { target = e.data.selector ? document.querySelector(e.data.selector) : null; } catch (err) { target = null; }
+                if (target) {
+                    var tr = target.getBoundingClientRect();
+                    window.scrollTo({
+                        top: Math.max(0, tr.top + getScrollY() - window.innerHeight / 2 + Math.min(tr.height / 2, 40)),
+                        behavior: 'smooth'
+                    });
+                } else {
+                    window.scrollTo({ left: 0, top: e.data.fallbackY || 0, behavior: 'smooth' });
+                }
+                setTimeout(reportState, 400);
             }
         });
 
